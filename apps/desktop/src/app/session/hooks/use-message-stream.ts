@@ -27,6 +27,7 @@ import {
   stripGeneratedImageEchoes
 } from '@/lib/generated-images'
 import { triggerHaptic } from '@/lib/haptics'
+import { isProviderOfflineErrorMessage } from '@/lib/provider-offline'
 import { isProviderSetupErrorMessage } from '@/lib/provider-setup-errors'
 import { parseTodos } from '@/lib/todos'
 import { clearClarifyRequest, setClarifyRequest } from '@/store/clarify'
@@ -866,6 +867,15 @@ export function useMessageStream({
 
         if (isActiveEvent) {
           triggerHaptic('streamStart')
+          setPetActivity({
+            messageAccepted: false,
+            modelPreparing: true,
+            providerOffline: false,
+            reasoning: false,
+            streaming: false,
+            temporaryError: false,
+            toolRunning: false
+          })
         }
 
         updateSessionState(sessionId, state => ({
@@ -884,6 +894,10 @@ export function useMessageStream({
         if (sessionId) {
           appendAssistantDelta(sessionId, coerceGatewayText(payload?.text))
         }
+
+        if (isActiveEvent) {
+          setPetActivity({ modelPreparing: false, reasoning: false, streaming: true })
+        }
       } else if (event.type === 'thinking.delta') {
         // thinking.delta carries the kawaii spinner status (face + verb from
         // KawaiiSpinner), not real reasoning. The bottom-of-thread loading
@@ -895,7 +909,7 @@ export function useMessageStream({
         }
 
         if (isActiveEvent) {
-          setPetActivity({ reasoning: true })
+          setPetActivity({ modelPreparing: false, reasoning: true, streaming: false })
         }
       } else if (event.type === 'reasoning.available') {
         if (sessionId) {
@@ -903,7 +917,7 @@ export function useMessageStream({
         }
 
         if (isActiveEvent) {
-          setPetActivity({ reasoning: true })
+          setPetActivity({ modelPreparing: false, reasoning: true, streaming: false })
         }
       } else if (event.type === 'moa.reference') {
         // MoA reference-model output — surface as a labelled thinking chunk
@@ -920,13 +934,13 @@ export function useMessageStream({
         }
 
         if (isActiveEvent) {
-          setPetActivity({ reasoning: true })
+          setPetActivity({ modelPreparing: false, reasoning: true, streaming: false })
         }
       } else if (event.type === 'moa.aggregating') {
         // Status transition only; the aggregator's reply arrives via the normal
         // message stream. No reasoning/transcript mutation here.
         if (isActiveEvent) {
-          setPetActivity({ reasoning: true })
+          setPetActivity({ modelPreparing: false, reasoning: true, streaming: false })
         }
       } else if (event.type === 'message.complete') {
         if (!sessionId) {
@@ -951,12 +965,17 @@ export function useMessageStream({
         if (isActiveEvent) {
           setTurnStartedAt(null)
 
-          // Pet beat: a finished turn always celebrates — go straight to the
-          // jump, never linger on the run/reason pose. One atom update (clears
-          // toolRunning/reasoning AND sets celebrate together) so no stray "run"
-          // frame leaks to the sprite — including the popped-out overlay, which
-          // mirrors each activity change. The jump runs ~2 loops, then settles.
-          flashPetActivity({ celebrate: true, reasoning: false, toolRunning: false }, 2200)
+          // Completion returns the companion to calm. Financial outcomes never
+          // trigger celebration or shame animations.
+          setPetActivity({
+            messageAccepted: false,
+            modelPreparing: false,
+            providerOffline: false,
+            reasoning: false,
+            streaming: false,
+            temporaryError: false,
+            toolRunning: false
+          })
 
           // Light up the pet's mail icon if the user wasn't looking when the turn
           // finished — a glanceable "new message" hint on the popped-out overlay.
@@ -988,7 +1007,7 @@ export function useMessageStream({
         upsertToolCall(sessionId, toTodoPayload(payload) ?? payload, 'running', event.type)
 
         if (isActiveEvent) {
-          setPetActivity({ reasoning: false, toolRunning: true })
+          setPetActivity({ modelPreparing: false, reasoning: false, streaming: false, toolRunning: true })
         }
       } else if (event.type === 'tool.complete') {
         if (sessionId) {
@@ -1211,6 +1230,7 @@ export function useMessageStream({
         }
       } else if (event.type === 'error') {
         const errorMessage = payload?.message || 'Hermes reported an error'
+        const providerOffline = isProviderOfflineErrorMessage(errorMessage)
         const looksLikeProviderSetup = isProviderSetupErrorMessage(errorMessage)
 
         // A turn that errors out has also ended — drop any open blocking prompt
@@ -1224,8 +1244,16 @@ export function useMessageStream({
         }
 
         if (isActiveEvent) {
-          setPetActivity({ reasoning: false, toolRunning: false })
-          flashPetActivity({ error: true })
+          setPetActivity({
+            messageAccepted: false,
+            modelPreparing: false,
+            providerOffline,
+            reasoning: false,
+            streaming: false,
+            temporaryError: false,
+            toolRunning: false
+          })
+          flashPetActivity({ error: !providerOffline })
         }
 
         dispatchNativeNotification({

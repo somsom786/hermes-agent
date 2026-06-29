@@ -974,7 +974,10 @@ export function DesktopController() {
       return
     }
 
-    setPetOverlaySubmitHandler(text => void submitTextRef.current(text))
+    setPetOverlaySubmitHandler(text => {
+      setPetActivity({ messageAccepted: true })
+      void submitTextRef.current(text)
+    })
     // Alt+wheel resize from the popped-out pet — persist it through this
     // window's gateway (the overlay has none) so it survives restart.
     setPetOverlayScaleHandler(scale => setPetScale(requestGatewayRef.current, scale))

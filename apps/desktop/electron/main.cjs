@@ -48,7 +48,12 @@ const { buildDesktopBackendEnv, normalizeHermesHomeRoot } = require('./backend-e
 const { readWindowsUserEnvVar } = require('./windows-user-env.cjs')
 const { readWslWindowsClipboardImage } = require('./wsl-clipboard-image.cjs')
 const { nativeOverlayWidth: computeNativeOverlayWidth } = require('./titlebar-overlay-width.cjs')
-const { buddyHomeBounds, shouldHideMainOnClose, shouldShowMainOnReady } = require('./companion-mode.cjs')
+const {
+  buddyHomeBounds,
+  clampBoundsToDisplays,
+  shouldHideMainOnClose,
+  shouldShowMainOnReady
+} = require('./companion-mode.cjs')
 const { readDirForIpc } = require('./fs-read-dir.cjs')
 const { readLiveUpdateMarker } = require('./update-marker.cjs')
 const {
@@ -5855,13 +5860,15 @@ function spawnPetOverlayWindow(bounds) {
 }
 
 function openPetOverlay(bounds) {
+  const safeBounds = bounds ? clampBoundsToDisplays(bounds, screen.getAllDisplays()) : bounds
+
   if (petOverlayWindow && !petOverlayWindow.isDestroyed()) {
-    if (bounds) {
+    if (safeBounds) {
       petOverlayWindow.setBounds({
-        x: Math.round(bounds.x),
-        y: Math.round(bounds.y),
-        width: Math.max(80, Math.round(bounds.width)),
-        height: Math.max(80, Math.round(bounds.height))
+        x: Math.round(safeBounds.x),
+        y: Math.round(safeBounds.y),
+        width: Math.max(80, Math.round(safeBounds.width)),
+        height: Math.max(80, Math.round(safeBounds.height))
       })
     }
 
@@ -5870,7 +5877,7 @@ function openPetOverlay(bounds) {
     return petOverlayWindow
   }
 
-  petOverlayWindow = spawnPetOverlayWindow(bounds)
+  petOverlayWindow = spawnPetOverlayWindow(safeBounds)
 
   return petOverlayWindow
 }
@@ -6178,9 +6185,11 @@ ipcMain.handle('hermes:pet-overlay:open', async (_event, request) => {
     // Fall back to raw bounds if the window geometry is unavailable.
   }
 
-  openPetOverlay(screenBounds)
+  const safeBounds = screenBounds ? clampBoundsToDisplays(screenBounds, screen.getAllDisplays()) : screenBounds
 
-  return { ok: true, bounds: screenBounds }
+  openPetOverlay(safeBounds)
+
+  return { ok: true, bounds: safeBounds }
 })
 ipcMain.handle('hermes:pet-overlay:close', async () => {
   closePetOverlay()
@@ -6199,8 +6208,9 @@ ipcMain.on('hermes:pet-overlay:set-bounds', (_event, bounds) => {
   }
 
   const win = petOverlayWindow
-  const width = Math.max(80, Math.round(bounds.width))
-  const height = Math.max(80, Math.round(bounds.height))
+  const safeBounds = clampBoundsToDisplays(bounds, screen.getAllDisplays())
+  const width = safeBounds.width
+  const height = safeBounds.height
   const [curW, curH] = win.getSize()
   const resizing = width !== curW || height !== curH
 
@@ -6208,7 +6218,7 @@ ipcMain.on('hermes:pet-overlay:set-bounds', (_event, bounds) => {
     win.setResizable(true)
   }
 
-  win.setBounds({ x: Math.round(bounds.x), y: Math.round(bounds.y), width, height })
+  win.setBounds({ x: safeBounds.x, y: safeBounds.y, width, height })
 
   if (resizing) {
     win.setResizable(false)

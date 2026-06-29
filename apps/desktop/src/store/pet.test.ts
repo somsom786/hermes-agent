@@ -5,30 +5,48 @@ import { $petActivity, $petState, derivePetState, flashPetActivity, setPetActivi
 describe('derivePetState', () => {
   it('rests at idle by default and uses waiting when awaiting input', () => {
     expect(derivePetState({})).toBe('idle')
-    expect(derivePetState({ awaitingInput: true })).toBe('waiting')
+    expect(derivePetState({ awaitingInput: true })).toBe('listening')
   })
 
-  it('runs when busy or a tool is executing', () => {
-    expect(derivePetState({ busy: true })).toBe('run')
-    expect(derivePetState({ toolRunning: true })).toBe('run')
+  it('thinks when busy or a tool is executing', () => {
+    expect(derivePetState({ busy: true })).toBe('thinking')
+    expect(derivePetState({ toolRunning: true })).toBe('thinking')
   })
 
-  it('reviews while reasoning (below tool, above bare busy)', () => {
-    expect(derivePetState({ reasoning: true })).toBe('review')
-    expect(derivePetState({ reasoning: true, busy: true })).toBe('review')
-    expect(derivePetState({ reasoning: true, toolRunning: true })).toBe('run')
+  it('uses canonical work states for model activity', () => {
+    expect(derivePetState({ reasoning: true })).toBe('thinking')
+    expect(derivePetState({ reasoning: true, busy: true })).toBe('thinking')
+    expect(derivePetState({ streaming: true })).toBe('talking')
+    expect(derivePetState({ memorySync: true })).toBe('writing')
   })
 
   it('waits (blocked on the user) above the in-flight signals', () => {
-    expect(derivePetState({ awaitingInput: true, toolRunning: true, busy: true })).toBe('waiting')
+    expect(derivePetState({ awaitingInput: true, toolRunning: true, busy: true })).toBe('listening')
     // but a finish beat still wins over waiting
     expect(derivePetState({ justCompleted: true, awaitingInput: true })).toBe('wave')
   })
 
   it('honors the full priority chain: error > celebrate > complete > tool', () => {
-    expect(derivePetState({ error: true, celebrate: true, busy: true })).toBe('failed')
+    expect(derivePetState({ error: true, celebrate: true, busy: true })).toBe('concerned')
     expect(derivePetState({ celebrate: true, justCompleted: true, toolRunning: true })).toBe('jump')
     expect(derivePetState({ justCompleted: true, toolRunning: true })).toBe('wave')
+  })
+
+  it('keeps physical desktop motion above conversation state', () => {
+    expect(derivePetState({ dragging: true, streaming: true })).toBe('dragged')
+    expect(derivePetState({ prefall: true, busy: true })).toBe('prefall')
+    expect(derivePetState({ falling: true, walkingDirection: 'left' })).toBe('fall_left')
+    expect(derivePetState({ falling: true, walkingDirection: 'right' })).toBe('fall_right')
+    expect(derivePetState({ landing: true })).toBe('land')
+    expect(derivePetState({ recovering: true })).toBe('recover')
+  })
+
+  it('surfaces offline and posture states deterministically', () => {
+    expect(derivePetState({ providerOffline: true, busy: true })).toBe('offline')
+    expect(derivePetState({ sleeping: true })).toBe('sleep')
+    expect(derivePetState({ sitting: true })).toBe('sit')
+    expect(derivePetState({ walkingDirection: 'left' })).toBe('walk_left')
+    expect(derivePetState({ walkingDirection: 'right' })).toBe('walk_right')
   })
 })
 

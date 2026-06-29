@@ -12,7 +12,30 @@ import { $busy } from '@/store/session'
  * `agent/pet/state.py` so the Python and TS surfaces never drift.
  */
 
-export type PetState = 'idle' | 'wave' | 'run' | 'failed' | 'review' | 'jump' | 'waiting'
+export type PetState =
+  | 'idle'
+  | 'walk_left'
+  | 'walk_right'
+  | 'sit'
+  | 'sleep'
+  | 'dragged'
+  | 'prefall'
+  | 'fall_left'
+  | 'fall_right'
+  | 'land'
+  | 'recover'
+  | 'listening'
+  | 'thinking'
+  | 'talking'
+  | 'writing'
+  | 'concerned'
+  | 'offline'
+  | 'wave'
+  | 'run'
+  | 'failed'
+  | 'review'
+  | 'jump'
+  | 'waiting'
 
 export interface PetInfo {
   enabled: boolean
@@ -46,6 +69,21 @@ export interface PetActivity {
   error?: boolean
   justCompleted?: boolean
   celebrate?: boolean
+  userTyping?: boolean
+  messageAccepted?: boolean
+  modelPreparing?: boolean
+  streaming?: boolean
+  memorySync?: boolean
+  providerOffline?: boolean
+  temporaryError?: boolean
+  sleeping?: boolean
+  sitting?: boolean
+  dragging?: boolean
+  prefall?: boolean
+  falling?: boolean
+  landing?: boolean
+  recovering?: boolean
+  walkingDirection?: 'left' | 'right' | undefined
 }
 
 /**
@@ -57,8 +95,40 @@ export interface PetActivity {
  * the in-flight signals because the turn is paused on you, not working.
  */
 export function derivePetState(activity: PetActivity): PetState {
-  if (activity.error) {
-    return 'failed'
+  if (activity.dragging) {
+    return 'dragged'
+  }
+
+  if (activity.prefall) {
+    return 'prefall'
+  }
+
+  if (activity.falling) {
+    return activity.walkingDirection === 'left' ? 'fall_left' : 'fall_right'
+  }
+
+  if (activity.landing) {
+    return 'land'
+  }
+
+  if (activity.recovering) {
+    return 'recover'
+  }
+
+  if (activity.walkingDirection === 'left') {
+    return 'walk_left'
+  }
+
+  if (activity.walkingDirection === 'right') {
+    return 'walk_right'
+  }
+
+  if (activity.providerOffline) {
+    return 'offline'
+  }
+
+  if (activity.error || activity.temporaryError) {
+    return 'concerned'
   }
 
   if (activity.celebrate) {
@@ -69,20 +139,32 @@ export function derivePetState(activity: PetActivity): PetState {
     return 'wave'
   }
 
-  if (activity.awaitingInput) {
-    return 'waiting'
+  if (activity.userTyping || activity.messageAccepted || activity.awaitingInput) {
+    return 'listening'
   }
 
-  if (activity.toolRunning) {
-    return 'run'
+  if (activity.streaming) {
+    return 'talking'
   }
 
-  if (activity.reasoning) {
-    return 'review'
+  if (activity.memorySync) {
+    return 'writing'
+  }
+
+  if (activity.toolRunning || activity.reasoning || activity.modelPreparing) {
+    return 'thinking'
   }
 
   if (activity.busy) {
-    return 'run'
+    return 'thinking'
+  }
+
+  if (activity.sleeping) {
+    return 'sleep'
+  }
+
+  if (activity.sitting) {
+    return 'sit'
   }
 
   return 'idle'
@@ -153,7 +235,22 @@ export const $petState = computed([$petActivity, $busy], (activity, busy): PetSt
     toolRunning: live && activity.toolRunning,
     reasoning: live && activity.reasoning,
     error: activity.error,
+    providerOffline: activity.providerOffline,
+    temporaryError: activity.temporaryError,
     justCompleted: activity.justCompleted,
-    celebrate: activity.celebrate
+    celebrate: activity.celebrate,
+    userTyping: activity.userTyping,
+    messageAccepted: activity.messageAccepted,
+    modelPreparing: activity.modelPreparing,
+    streaming: activity.streaming,
+    memorySync: activity.memorySync,
+    sleeping: activity.sleeping,
+    sitting: activity.sitting,
+    dragging: activity.dragging,
+    prefall: activity.prefall,
+    falling: activity.falling,
+    landing: activity.landing,
+    recovering: activity.recovering,
+    walkingDirection: activity.walkingDirection
   })
 })

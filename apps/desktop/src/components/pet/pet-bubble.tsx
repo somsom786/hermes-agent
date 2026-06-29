@@ -13,6 +13,30 @@ interface Spec {
 }
 
 const SPECS: Partial<Record<PetState, Spec>> = {
+  thinking: {
+    lines: ['thinking…', 'checking…', 'steady…', 'sorting it…']
+  },
+  talking: {
+    lines: ['talking it through…', 'one thought…', 'here we go…']
+  },
+  writing: {
+    lines: ['writing this down…', 'saving the thread…', 'journaling…']
+  },
+  listening: {
+    glyph: Clock,
+    lines: ['I’m listening', 'your turn', 'all yours', 'right here'],
+    tone: 'wait'
+  },
+  concerned: {
+    glyph: AlertCircle,
+    lines: ['hit a snag', 'need a reset', 'one bump'],
+    tone: 'error'
+  },
+  offline: {
+    glyph: AlertCircle,
+    lines: ['offline for now', 'can’t reach Hermes', 'connection nap'],
+    tone: 'error'
+  },
   run: {
     lines: ['with you…', 'thinking…', 'checking…', 'steady…', 'one sec…', 'sorting it…']
   },
@@ -56,9 +80,9 @@ export function PetBubble() {
   const [line, setLine] = useState('')
 
   const specKey: null | PetState =
-    state in SPECS ? state : state === 'idle' && activity.awaitingInput ? 'waiting' : null
+    state in SPECS ? state : state === 'idle' && activity.awaitingInput ? 'listening' : null
 
-  const rotating = specKey === 'run' || specKey === 'review'
+  const rotating = specKey === 'run' || specKey === 'review' || specKey === 'thinking' || specKey === 'talking'
 
   useEffect(() => {
     const spec = specKey ? SPECS[specKey] : null

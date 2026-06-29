@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { PetBubble } from '@/components/pet/pet-bubble'
 import { PetSprite } from '@/components/pet/pet-sprite'
 import { type PetZoomAnchor, usePetZoomGesture } from '@/components/pet/use-pet-zoom-gesture'
+import { useMediaQuery } from '@/hooks/use-media-query'
 import {
   Mail,
   MessageCircle,
@@ -19,7 +20,14 @@ import {
   Sun,
   X
 } from '@/lib/icons'
-import { $petActivity, $petInfo, setPetInfo } from '@/store/pet'
+import { $petActivity, $petInfo, setPetActivity, setPetInfo } from '@/store/pet'
+import {
+  advanceReleaseMotion,
+  advanceWalkBounds,
+  createAutonomousWalkPlan,
+  createReleaseMotion,
+  type PetWorkArea
+} from '@/store/pet-motion'
 import { overlayWindowSize } from '@/store/pet-overlay'
 import { setAwaitingResponse, setBusy } from '@/store/session'
 
@@ -30,6 +38,7 @@ const PET_PADDING_BOTTOM = 24
 const ALPHA_HIT_THRESHOLD = 16
 const CLICK_SLOP_PX = 3
 const DOUBLE_CLICK_MS = 250
+const RELEASE_TICK_MS = 32
 
 interface DragState {
   startX: number
@@ -39,6 +48,20 @@ interface DragState {
   width: number
   height: number
   moved: boolean
+}
+
+function currentWorkArea(): PetWorkArea {
+  const currentScreen = window.screen as Screen & {
+    availLeft?: number
+    availTop?: number
+  }
+
+  return {
+    height: currentScreen.availHeight,
+    width: currentScreen.availWidth,
+    x: currentScreen.availLeft ?? 0,
+    y: currentScreen.availTop ?? 0
+  }
 }
 
 type PetMenuControl = 'bring-back' | 'open-journal' | 'open-settings' | 'open-skins' | 'quit' | 'restart-buddy'
@@ -61,6 +84,28 @@ export function PetOverlayApp() {
   const composerOpenRef = useRef(false)
   const menuOpenRef = useRef(false)
   const clickTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const releaseTimersRef = useRef<ReturnType<typeof setTimeout>[]>([])
+  const releaseIntervalRef = useRef<ReturnType<typeof setInterval> | undefined>(undefined)
+  const autonomousTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const autonomousIntervalRef = useRef<ReturnType<typeof setInterval> | undefined>(undefined)
+  const reducedMotion = useMediaQuery('(prefers-reduced-motion: reduce)')
+
+  const clearReleaseTimers = useCallback(() => {
+    for (const id of releaseTimersRef.current) {
+      clearTimeout(id)
+    }
+
+    releaseTimersRef.current = []
+    clearInterval(releaseIntervalRef.current)
+    releaseIntervalRef.current = undefined
+  }, [])
+
+  const clearAutonomousMovement = useCallback(() => {
+    clearTimeout(autonomousTimeoutRef.current)
+    clearInterval(autonomousIntervalRef.current)
+    autonomousTimeoutRef.current = undefined
+    autonomousIntervalRef.current = undefined
+  }, [])
 
   const setIgnore = (ignore: boolean) => {
     if (ignoreRef.current !== ignore) {
@@ -72,7 +117,21 @@ export function PetOverlayApp() {
   useEffect(() => {
     const off = window.hermesDesktop?.petOverlay?.onState(payload => {
       setPetInfo(payload.info)
-      $petActivity.set(payload.activity ?? {})
+      const local = $petActivity.get()
+
+      $petActivity.set({
+        ...(payload.activity ?? {}),
+        busy: Boolean(payload.busy),
+        dragging: local.dragging,
+        falling: local.falling,
+        landing: local.landing,
+        prefall: local.prefall,
+        recovering: local.recovering,
+        sitting: local.sitting,
+        sleeping: local.sleeping,
+        userTyping: local.userTyping,
+        walkingDirection: local.walkingDirection
+      })
       setBusy(Boolean(payload.busy))
       setAwaitingResponse(Boolean(payload.awaiting))
       setUnread(Boolean(payload.unread))
@@ -135,8 +194,99 @@ export function PetOverlayApp() {
     return () => {
       window.removeEventListener('mousemove', onMove)
       clearTimeout(clickTimerRef.current)
+      clearReleaseTimers()
+      clearAutonomousMovement()
     }
-  }, [])
+  }, [clearAutonomousMovement, clearReleaseTimers])
+
+  useEffect(() => {
+    setPetActivity({ sleeping, sitting: quiet, userTyping: composerOpen && draft.trim().length > 0 })
+  }, [composerOpen, draft, quiet, sleeping])
+
+  const physicalMovement =
+    activity.dragging || activity.falling || activity.landing || activity.prefall || activity.recovering
+
+  const movementBlocked =
+    reducedMotion ||
+    sleeping ||
+    quiet ||
+    composerOpen ||
+    menuOpen ||
+    Boolean(
+      activity.busy ||
+      activity.awaitingInput ||
+      physicalMovement ||
+      activity.reasoning ||
+      activity.streaming ||
+      activity.toolRunning
+    )
+
+  useEffect(() => {
+    clearAutonomousMovement()
+
+    if (movementBlocked || !info.enabled || !info.spritesheetBase64) {
+      if (!physicalMovement) {
+        setPetActivity({ walkingDirection: undefined })
+      }
+
+      return
+    }
+
+    let cancelled = false
+
+    const scheduleWalk = () => {
+      const plan = createAutonomousWalkPlan()
+
+      autonomousTimeoutRef.current = setTimeout(() => {
+        if (cancelled || dragRef.current) {
+          return
+        }
+
+        let completedSteps = 0
+
+        let currentBounds = {
+          height: window.outerHeight,
+          width: window.outerWidth,
+          x: window.screenX,
+          y: window.screenY
+        }
+
+        setPetActivity({ walkingDirection: plan.direction })
+        autonomousIntervalRef.current = setInterval(() => {
+          if (cancelled || dragRef.current) {
+            clearAutonomousMovement()
+            setPetActivity({ walkingDirection: undefined })
+
+            return
+          }
+
+          const next = advanceWalkBounds(currentBounds, plan.direction, plan.stepPx, currentWorkArea())
+
+          currentBounds = next
+          window.hermesDesktop?.petOverlay?.setBounds(next)
+          completedSteps += 1
+
+          if (completedSteps >= plan.steps) {
+            clearInterval(autonomousIntervalRef.current)
+            autonomousIntervalRef.current = undefined
+            setPetActivity({ walkingDirection: undefined })
+            window.hermesDesktop?.petOverlay?.control({
+              bounds: currentBounds,
+              type: 'bounds'
+            })
+            scheduleWalk()
+          }
+        }, plan.tickMs)
+      }, plan.cooldownMs)
+    }
+
+    scheduleWalk()
+
+    return () => {
+      cancelled = true
+      clearAutonomousMovement()
+    }
+  }, [clearAutonomousMovement, info.enabled, info.spritesheetBase64, movementBlocked, physicalMovement])
 
   useEffect(() => {
     composerOpenRef.current = composerOpen
@@ -159,6 +309,16 @@ export function PetOverlayApp() {
     }
 
     ;(e.target as Element).setPointerCapture?.(e.pointerId)
+    clearReleaseTimers()
+    clearAutonomousMovement()
+    setPetActivity({
+      dragging: true,
+      falling: false,
+      landing: false,
+      prefall: false,
+      recovering: false,
+      walkingDirection: undefined
+    })
     dragRef.current = {
       height: window.outerHeight,
       moved: false,
@@ -201,14 +361,74 @@ export function PetOverlayApp() {
     if (drag.moved) {
       clearTimeout(clickTimerRef.current)
       clickTimerRef.current = undefined
+      const direction = e.screenX - drag.startX < 0 ? 'left' : 'right'
 
-      window.hermesDesktop?.petOverlay?.control({
-        bounds: { height: drag.height, width: drag.width, x: e.screenX - drag.offX, y: e.screenY - drag.offY },
-        type: 'bounds'
+      let currentBounds = {
+        height: drag.height,
+        width: drag.width,
+        x: e.screenX - drag.offX,
+        y: e.screenY - drag.offY
+      }
+
+      let releaseMotion = createReleaseMotion(e.screenX - drag.startX)
+
+      setPetActivity({
+        dragging: false,
+        falling: false,
+        landing: false,
+        prefall: true,
+        recovering: false,
+        walkingDirection: direction
       })
+      releaseTimersRef.current = [
+        setTimeout(() => {
+          setPetActivity({ falling: true, prefall: false, walkingDirection: direction })
+          releaseIntervalRef.current = setInterval(() => {
+            const frame = advanceReleaseMotion(currentBounds, releaseMotion, currentWorkArea())
+
+            currentBounds = frame.bounds
+            releaseMotion = frame.motion
+            window.hermesDesktop?.petOverlay?.setBounds(currentBounds)
+
+            if (!frame.landed) {
+              return
+            }
+
+            clearInterval(releaseIntervalRef.current)
+            releaseIntervalRef.current = undefined
+            window.hermesDesktop?.petOverlay?.control({ bounds: currentBounds, type: 'bounds' })
+            setPetActivity({
+              falling: false,
+              landing: true,
+              prefall: false,
+              walkingDirection: direction
+            })
+            releaseTimersRef.current.push(
+              setTimeout(() => setPetActivity({ landing: false, recovering: true }), 280),
+              setTimeout(
+                () =>
+                  setPetActivity({
+                    recovering: false,
+                    walkingDirection: undefined
+                  }),
+                660
+              )
+            )
+          }, RELEASE_TICK_MS)
+        }, 140)
+      ]
 
       return
     }
+
+    setPetActivity({
+      dragging: false,
+      falling: false,
+      landing: false,
+      prefall: false,
+      recovering: false,
+      walkingDirection: undefined
+    })
 
     if (e.shiftKey) {
       window.hermesDesktop?.petOverlay?.control({ type: 'pop-in' })
@@ -235,6 +455,7 @@ export function PetOverlayApp() {
     const text = draft.trim()
 
     if (text) {
+      setPetActivity({ messageAccepted: true, userTyping: false })
       window.hermesDesktop?.petOverlay?.control({ text, type: 'submit' })
     }
 
@@ -273,13 +494,17 @@ export function PetOverlayApp() {
     ? 'sleeping'
     : quiet
       ? 'quiet'
-      : activity.error
-        ? 'snag'
-        : activity.awaitingInput
-          ? 'listening'
-          : activity.busy || activity.reasoning || activity.toolRunning
-            ? 'thinking'
-            : 'safe mode'
+      : activity.providerOffline
+        ? 'offline'
+        : activity.error || activity.temporaryError
+          ? 'snag'
+          : activity.streaming
+            ? 'talking'
+            : activity.awaitingInput
+              ? 'listening'
+              : activity.busy || activity.reasoning || activity.toolRunning
+                ? 'thinking'
+                : 'safe mode'
 
   const onScale = useCallback((next: number, anchor: PetZoomAnchor) => {
     zoomAnchorRef.current = anchor
