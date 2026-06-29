@@ -5903,6 +5903,14 @@ function focusMainWindow() {
   mainWindow.focus()
 }
 
+function focusMainWindowAndForward(payload) {
+  focusMainWindow()
+
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('hermes:pet-overlay:control', payload)
+  }
+}
+
 function bringBuddyBack() {
   if (petOverlayWindow && !petOverlayWindow.isDestroyed()) {
     const area = screen.getPrimaryDisplay().workArea
@@ -5932,6 +5940,10 @@ function createCompanionTray() {
       { label: 'Open Buddy', click: bringBuddyBack },
       { label: 'Bring Buddy Back', click: bringBuddyBack },
       { label: 'Open Main Window', click: focusMainWindow },
+      {
+        label: 'Change Pet Skin',
+        click: () => focusMainWindowAndForward({ type: 'open-skins' })
+      },
       { type: 'separator' },
       {
         label: 'Quit',
@@ -6241,6 +6253,27 @@ ipcMain.on('hermes:pet-overlay:control', (_event, payload) => {
     return
   }
 
+  if (payload && payload.type === 'bring-back') {
+    bringBuddyBack()
+
+    return
+  }
+
+  if (payload && payload.type === 'restart-buddy') {
+    if (petOverlayWindow && !petOverlayWindow.isDestroyed()) {
+      petOverlayWindow.webContents.reloadIgnoringCache()
+    }
+
+    return
+  }
+
+  if (payload && payload.type === 'quit') {
+    isAppQuitting = true
+    app.quit()
+
+    return
+  }
+
   // Double-click toggles the app window: hide it away if it's up front, bring it
   // back if it's minimized/buried. Pure window control — nothing for the
   // renderer to do, so don't forward it.
@@ -6255,9 +6288,15 @@ ipcMain.on('hermes:pet-overlay:control', (_event, payload) => {
     return
   }
 
-  // The mail icon means "take me to the app": raise the main window (it may be
-  // minimized or buried) before the renderer navigates to the latest thread.
-  if (payload && payload.type === 'open-app') {
+  // The mail icon and pet menu entries mean "take me to the app": raise the
+  // main window before the renderer navigates/opens Petdex/settings.
+  if (
+    payload &&
+    (payload.type === 'open-app' ||
+      payload.type === 'open-skins' ||
+      payload.type === 'open-journal' ||
+      payload.type === 'open-settings')
+  ) {
     if (mainWindow.isMinimized()) {
       mainWindow.restore()
     }

@@ -25,6 +25,7 @@ import {
   normalizeSessionSource
 } from '../lib/session-source'
 import { latestSessionTodos } from '../lib/todos'
+import { openCommandPalettePage } from '../store/command-palette'
 import { setCronFocusJobId, setCronJobs } from '../store/cron'
 import {
   $fileBrowserOpen,
@@ -50,6 +51,9 @@ import { setPetActivity } from '../store/pet'
 import { setPetScale } from '../store/pet-gallery'
 import {
   setPetOverlayOpenAppHandler,
+  setPetOverlayOpenJournalHandler,
+  setPetOverlayOpenSettingsHandler,
+  setPetOverlayOpenSkinsHandler,
   setPetOverlayScaleHandler,
   setPetOverlaySubmitHandler
 } from '../store/pet-overlay'
@@ -984,13 +988,26 @@ export function DesktopController() {
         void resumeSessionRef.current(recent.id)
       }
     })
+    // Buddy menu: surface the existing Petdex gallery rather than creating a
+    // second skin system. Selection remains profile-scoped and persisted by the
+    // Petdex backend.
+    setPetOverlayOpenSkinsHandler(() => openCommandPalettePage('pets'))
+    setPetOverlayOpenJournalHandler(() => {
+      navigate(NEW_CHAT_ROUTE)
+      requestComposerInsert('Journal this:', { mode: 'block', target: 'main' })
+      requestComposerFocus('main')
+    })
+    setPetOverlayOpenSettingsHandler(() => navigate(SETTINGS_ROUTE))
 
     return () => {
       setPetOverlaySubmitHandler(null)
       setPetOverlayOpenAppHandler(null)
+      setPetOverlayOpenSkinsHandler(null)
+      setPetOverlayOpenJournalHandler(null)
+      setPetOverlayOpenSettingsHandler(null)
       setPetOverlayScaleHandler(null)
     }
-  }, [])
+  }, [navigate])
 
   // Mirror "a session is blocked on the user" (clarify/approval) into the pet's
   // awaitingInput flag so it shows the `waiting` pose. Lives on $petActivity so
@@ -1117,9 +1134,7 @@ export function DesktopController() {
   // layer) so pane resize handles still paint above it. Terminals own their state
   // (incl. a snapshotted cwd) independent of the session, so switching sessions
   // never rebuilds or closes them; toggling the pane never rebuilds the shells.
-  const mainOverlays = (
-    <PersistentTerminal onAddSelectionToChat={composer.addTerminalSelectionAttachment} />
-  )
+  const mainOverlays = <PersistentTerminal onAddSelectionToChat={composer.addTerminalSelectionAttachment} />
 
   const overlays = (
     <>

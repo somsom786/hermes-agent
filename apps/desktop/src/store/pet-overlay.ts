@@ -54,9 +54,15 @@ export type PetOverlayControl =
   | { type: 'submit'; text: string }
   | { type: 'bounds'; bounds: PetOverlayBounds }
   | { type: 'open-app' }
+  | { type: 'open-skins' }
+  | { type: 'open-journal' }
+  | { type: 'open-settings' }
   | { type: 'toggle-app' }
   | { type: 'show' }
   | { type: 'scale'; scale: number }
+  | { type: 'bring-back' }
+  | { type: 'restart-buddy' }
+  | { type: 'quit' }
 
 // Persisted across restarts: was the pet popped out, and where on the desktop
 // did the user leave it. Keyed v1; bump if the bounds shape ever changes.
@@ -124,6 +130,9 @@ let stateUnsubs: Array<() => void> = []
 let controlUnsub: (() => void) | null = null
 let submitHandler: ((text: string) => void) | null = null
 let openAppHandler: (() => void) | null = null
+let openJournalHandler: (() => void) | null = null
+let openSettingsHandler: (() => void) | null = null
+let openSkinsHandler: (() => void) | null = null
 let scaleHandler: ((scale: number) => void) | null = null
 
 function currentPayload(): PetOverlayStatePayload {
@@ -259,6 +268,21 @@ export function setPetOverlayOpenAppHandler(fn: (() => void) | null): void {
   openAppHandler = fn
 }
 
+/** Register the handler that opens the real Petdex skin chooser in the main window. */
+export function setPetOverlayOpenSkinsHandler(fn: (() => void) | null): void {
+  openSkinsHandler = fn
+}
+
+/** Register the handler that opens the journal entry point in the main window. */
+export function setPetOverlayOpenJournalHandler(fn: (() => void) | null): void {
+  openJournalHandler = fn
+}
+
+/** Register the handler that opens settings in the main window. */
+export function setPetOverlayOpenSettingsHandler(fn: (() => void) | null): void {
+  openSettingsHandler = fn
+}
+
 /** Register the handler that persists a scale resized via the overlay's Alt+wheel gesture. */
 export function setPetOverlayScaleHandler(fn: ((scale: number) => void) | null): void {
   scaleHandler = fn
@@ -296,6 +320,12 @@ export function initPetOverlayBridge(): () => void {
       // focused the window before forwarding this) and mark it read.
       clearPetUnread()
       openAppHandler?.()
+    } else if (payload?.type === 'open-skins') {
+      openSkinsHandler?.()
+    } else if (payload?.type === 'open-journal') {
+      openJournalHandler?.()
+    } else if (payload?.type === 'open-settings') {
+      openSettingsHandler?.()
     } else if (payload?.type === 'show') {
       $petOverlayActive.set(true)
       restorePetOverlay()
