@@ -29,8 +29,10 @@ test('closing the main window hides it unless the application is quitting', () =
 })
 
 test('Bring Buddy Back places the overlay inside the primary work area', () => {
-  assert.deepEqual(
-    buddyHomeBounds({ x: -1920, y: 0, width: 1920, height: 1080 }, { width: 240, height: 300 }),
-    { x: -264, y: 756, width: 240, height: 300 }
-  )
+  assert.deepEqual(buddyHomeBounds({ x: -1920, y: 0, width: 1920, height: 1080 }, { width: 240, height: 300 }), {
+    x: -264,
+    y: 756,
+    width: 240,
+    height: 300
+  })
 })
