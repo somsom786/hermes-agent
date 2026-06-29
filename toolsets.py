@@ -211,6 +211,12 @@ TOOLSETS = {
         "includes": []
     },
 
+    "trading-buddy-companion": {
+        "description": "Trading Buddy Companion Safe Mode: conversation only, with no callable tools",
+        "tools": [],
+        "includes": []
+    },
+
     "context_engine": {
         "description": "Runtime tools exposed by the active context engine",
         "tools": [],

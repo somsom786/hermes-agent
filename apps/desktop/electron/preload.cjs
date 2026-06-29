@@ -1,6 +1,10 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron')
 
 contextBridge.exposeInMainWorld('hermesDesktop', {
+  brand: {
+    companionMode: process.env.TRADING_BUDDY_COMPANION === '1',
+    productName: 'Trading Buddy BETA v0.2'
+  },
   getConnection: profile => ipcRenderer.invoke('hermes:connection', profile),
   revalidateConnection: () => ipcRenderer.invoke('hermes:connection:revalidate'),
   touchBackend: profile => ipcRenderer.invoke('hermes:backend:touch', profile),

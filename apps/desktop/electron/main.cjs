@@ -1,8 +1,10 @@
 const {
   app,
   BrowserWindow,
+  globalShortcut,
   Menu,
   Notification,
+  Tray,
   clipboard,
   dialog,
   ipcMain,
@@ -46,6 +48,7 @@ const { buildDesktopBackendEnv, normalizeHermesHomeRoot } = require('./backend-e
 const { readWindowsUserEnvVar } = require('./windows-user-env.cjs')
 const { readWslWindowsClipboardImage } = require('./wsl-clipboard-image.cjs')
 const { nativeOverlayWidth: computeNativeOverlayWidth } = require('./titlebar-overlay-width.cjs')
+const { buddyHomeBounds, shouldHideMainOnClose, shouldShowMainOnReady } = require('./companion-mode.cjs')
 const { readDirForIpc } = require('./fs-read-dir.cjs')
 const { readLiveUpdateMarker } = require('./update-marker.cjs')
 const {
@@ -160,6 +163,7 @@ const IS_PACKAGED = app.isPackaged
 const IS_MAC = process.platform === 'darwin'
 const IS_WINDOWS = process.platform === 'win32'
 const IS_WSL = isWslEnvironment()
+const TRADING_BUDDY_MODE = process.env.TRADING_BUDDY_COMPANION === '1'
 const APP_ROOT = app.getAppPath()
 
 function hiddenWindowsChildOptions(options = {}) {
@@ -402,7 +406,7 @@ const BOOT_FAKE_STEP_MS = (() => {
   if (!Number.isFinite(raw) || raw <= 0) return 650
   return Math.max(120, raw)
 })()
-const APP_NAME = 'Hermes'
+const APP_NAME = 'Trading Buddy BETA v0.2'
 const TITLEBAR_HEIGHT = 34
 const MACOS_TRAFFIC_LIGHTS_HEIGHT = 14
 const WINDOW_BUTTON_POSITION = {
@@ -685,7 +689,7 @@ app.setName(APP_NAME)
 // need this, so gate it on Windows. (Fixes: desktop approval/turn notifications
 // never firing on Windows.)
 if (IS_WINDOWS) {
-  app.setAppUserModelId('com.nousresearch.hermes')
+  app.setAppUserModelId('com.somsom786.tradingbuddy')
 }
 // Seed the native About panel with the live Hermes version. This is refreshed
 // on every open via the explicit "About" menu handler (refreshAboutPanel), so
@@ -694,7 +698,7 @@ if (IS_WINDOWS) {
 app.setAboutPanelOptions({
   applicationName: APP_NAME,
   applicationVersion: resolveHermesVersion(),
-  copyright: 'Copyright © 2026 Nous Research'
+  copyright: 'Copyright © 2026 Trading Buddy contributors · Hermes Agent by Nous Research'
 })
 
 // Custom scheme for streaming local media (video/audio) into the renderer.
@@ -5754,6 +5758,8 @@ function createNewSessionWindow() {
 // pushes pet state over IPC (hermes:pet-overlay:state); the overlay just renders
 // it. Control flows back (pop-in, composer submit) via hermes:pet-overlay:control.
 let petOverlayWindow = null
+let companionTray = null
+let isAppQuitting = false
 
 function petOverlayUrl() {
   if (DEV_SERVER) {
@@ -5882,6 +5888,63 @@ function closePetOverlay() {
   petOverlayWindow = null
 }
 
+function focusMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createWindow()
+
+    return
+  }
+
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore()
+  }
+
+  mainWindow.show()
+  mainWindow.focus()
+}
+
+function bringBuddyBack() {
+  if (petOverlayWindow && !petOverlayWindow.isDestroyed()) {
+    const area = screen.getPrimaryDisplay().workArea
+    const [width, height] = petOverlayWindow.getSize()
+    petOverlayWindow.setBounds(buddyHomeBounds(area, { width, height }))
+    petOverlayWindow.showInactive()
+
+    return
+  }
+
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('hermes:pet-overlay:control', { type: 'show' })
+  }
+}
+
+function createCompanionTray() {
+  if (!TRADING_BUDDY_MODE || companionTray) {
+    return
+  }
+
+  const iconPath = getAppIconPath()
+  const icon = iconPath ? nativeImage.createFromPath(iconPath) : nativeImage.createEmpty()
+  companionTray = new Tray(icon)
+  companionTray.setToolTip(APP_NAME)
+  companionTray.setContextMenu(
+    Menu.buildFromTemplate([
+      { label: 'Open Buddy', click: bringBuddyBack },
+      { label: 'Bring Buddy Back', click: bringBuddyBack },
+      { label: 'Open Main Window', click: focusMainWindow },
+      { type: 'separator' },
+      {
+        label: 'Quit',
+        click: () => {
+          isAppQuitting = true
+          app.quit()
+        }
+      }
+    ])
+  )
+  companionTray.on('double-click', focusMainWindow)
+}
+
 function createWindow() {
   const icon = getAppIconPath()
   const savedWindowState = readWindowState()
@@ -5889,7 +5952,7 @@ function createWindow() {
     ...computeWindowOptions(savedWindowState, screen.getAllDisplays()),
     minWidth: WINDOW_MIN_WIDTH,
     minHeight: WINDOW_MIN_HEIGHT,
-    title: 'Hermes',
+    title: APP_NAME,
     // Frameless title bar on every platform so the renderer can paint the
     // "hide sidebar" button (and other left-side titlebar tools) flush with
     // the top edge — matching the macOS layout where the traffic lights sit
@@ -5933,7 +5996,7 @@ function createWindow() {
   if (savedWindowState?.isMaximized) mainWindow.maximize()
 
   mainWindow.once('ready-to-show', () => {
-    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show()
+    if (mainWindow && !mainWindow.isDestroyed() && shouldShowMainOnReady(TRADING_BUDDY_MODE)) mainWindow.show()
   })
 
   mainWindow.on('will-enter-full-screen', () => sendWindowStateChanged(true))
@@ -5947,12 +6010,20 @@ function createWindow() {
   mainWindow.on('moved', schedulePersistWindowState)
   mainWindow.on('maximize', schedulePersistWindowState)
   mainWindow.on('unmaximize', schedulePersistWindowState)
-  mainWindow.on('close', () => schedulePersistWindowState.flush())
+  mainWindow.on('close', event => {
+    schedulePersistWindowState.flush()
+    if (shouldHideMainOnClose({ companionMode: TRADING_BUDDY_MODE, isAppQuitting, isQuittingForHandoff })) {
+      event.preventDefault()
+      mainWindow.hide()
+    }
+  })
 
   // The overlay rides the main window — closing the app's primary window must
   // tear it down too (otherwise it strands as an orphan that blocks
   // window-all-closed from quitting on Windows/Linux).
-  mainWindow.on('closed', () => closePetOverlay())
+  mainWindow.on('closed', () => {
+    if (!TRADING_BUDDY_MODE) closePetOverlay()
+  })
 
   wireCommonWindowHandlers(mainWindow)
 
@@ -7533,6 +7604,16 @@ app.whenReady().then(() => {
   configureSpellChecker()
   registerPowerResumeListeners()
   createWindow()
+  createCompanionTray()
+  if (TRADING_BUDDY_MODE) {
+    globalShortcut.register('CommandOrControl+Shift+Space', () => {
+      if (mainWindow?.isVisible()) {
+        mainWindow.hide()
+      } else {
+        focusMainWindow()
+      }
+    })
+  }
 
   // Win/Linux cold start: the launching hermes:// URL is in our own argv.
   const _coldStartLink = _extractDeepLink(process.argv)
@@ -7574,6 +7655,7 @@ function configureSpellChecker() {
 }
 
 app.on('before-quit', () => {
+  isAppQuitting = true
   // The always-on-top overlay isn't a "real" app window; close it so a stray
   // pet can't keep the process alive or float over a quit app.
   closePetOverlay()
@@ -7604,6 +7686,12 @@ app.on('before-quit', () => {
     hermesProcess.kill('SIGTERM')
   }
   stopAllPoolBackends()
+})
+
+app.on('will-quit', () => {
+  globalShortcut.unregisterAll()
+  companionTray?.destroy()
+  companionTray = null
 })
 
 app.on('window-all-closed', () => {

@@ -55,6 +55,7 @@ export type PetOverlayControl =
   | { type: 'bounds'; bounds: PetOverlayBounds }
   | { type: 'open-app' }
   | { type: 'toggle-app' }
+  | { type: 'show' }
   | { type: 'scale'; scale: number }
 
 // Persisted across restarts: was the pet popped out, and where on the desktop
@@ -62,7 +63,9 @@ export type PetOverlayControl =
 const OVERLAY_ACTIVE_KEY = 'hermes.desktop.pet-overlay-active.v1'
 const OVERLAY_BOUNDS_KEY = 'hermes.desktop.pet-overlay-bounds.v1'
 
-export const $petOverlayActive = atom(storedBoolean(OVERLAY_ACTIVE_KEY, false))
+export const $petOverlayActive = atom(
+  storedBoolean(OVERLAY_ACTIVE_KEY, window.hermesDesktop?.brand?.companionMode ?? false)
+)
 
 // Persist the in/out choice so a popped-out pet comes back popped out.
 $petOverlayActive.subscribe(active => persistBoolean(OVERLAY_ACTIVE_KEY, active))
@@ -211,6 +214,22 @@ export function restorePetOverlay(): void {
   const saved = loadSavedBounds()
 
   if (!saved) {
+    if (window.hermesDesktop?.brand?.companionMode) {
+      const pet = $petInfo.get()
+      const { width, height } = overlayWindowSize(pet.frameW ?? 192, pet.frameH ?? 208, pet.scale ?? 0.33)
+      openOverlay({
+        bounds: {
+          height,
+          width,
+          x: Math.max(16, window.innerWidth - width - 24),
+          y: Math.max(16, window.innerHeight - height - 24)
+        },
+        screen: false
+      })
+
+      return
+    }
+
     $petOverlayActive.set(false)
 
     return
@@ -277,6 +296,9 @@ export function initPetOverlayBridge(): () => void {
       // focused the window before forwarding this) and mark it read.
       clearPetUnread()
       openAppHandler?.()
+    } else if (payload?.type === 'show') {
+      $petOverlayActive.set(true)
+      restorePetOverlay()
     }
   })
 
