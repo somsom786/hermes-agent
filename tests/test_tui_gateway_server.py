@@ -4831,6 +4831,69 @@ def test_prompt_submit_can_truncate_before_user_ordinal(monkeypatch):
         server._sessions.pop("sid", None)
 
 
+def test_prompt_submit_support_mode_changes_model_context_but_persists_clean_user_text(
+    monkeypatch,
+):
+    seen = {}
+
+    class _Agent:
+        def run_conversation(
+            self,
+            prompt,
+            conversation_history=None,
+            stream_callback=None,
+            persist_user_message=None,
+        ):
+            seen["prompt"] = prompt
+            seen["persist_user_message"] = persist_user_message
+            return {
+                "final_response": "I hear you.",
+                "messages": [
+                    *(conversation_history or []),
+                    {"role": "user", "content": persist_user_message or prompt},
+                    {"role": "assistant", "content": "I hear you."},
+                ],
+            }
+
+    class _ImmediateThread:
+        def __init__(self, target=None, daemon=None):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    server._sessions["sid"] = _session(agent=_Agent(), history=[])
+
+    try:
+        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+        monkeypatch.setattr(server, "_get_usage", lambda _a: {})
+        monkeypatch.setattr(server, "render_message", lambda _t, _c: "")
+        monkeypatch.setattr(server, "_emit", lambda *a: None)
+
+        response = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": "sid",
+                    "support_mode": "listen",
+                    "text": "I lost money today. Just listen.",
+                },
+            }
+        )
+
+        assert response.get("result"), f"got error: {response.get('error')}"
+        assert "Trading Buddy support mode: listen" in seen["prompt"]
+        assert "Do not make a plan" in seen["prompt"]
+        assert seen["persist_user_message"] == "I lost money today. Just listen."
+        assert server._sessions["sid"]["history"] == [
+            {"role": "user", "content": "I lost money today. Just listen."},
+            {"role": "assistant", "content": "I hear you."},
+        ]
+    finally:
+        server._sessions.pop("sid", None)
+
+
 # ---------------------------------------------------------------------------
 # session.interrupt must only cancel pending prompts owned by the calling
 # session — it must not blast-resolve clarify/sudo/secret prompts on

@@ -4737,7 +4737,12 @@ def _clear_inflight_turn(session: dict) -> None:
     session["inflight_turn"] = None
 
 
-def _enqueue_prompt(session: dict, text: Any, transport: Any) -> None:
+def _enqueue_prompt(
+    session: dict,
+    text: Any,
+    transport: Any,
+    support_mode: str | None = None,
+) -> None:
     """Stash a message to run as the very next turn once the live one ends.
 
     Used when a prompt arrives mid-turn (see ``_handle_busy_submit``). A single
@@ -4754,10 +4759,21 @@ def _enqueue_prompt(session: dict, text: Any, transport: Any) -> None:
     ):
         prev = existing["text"]
         text = f"{prev}\n\n{text}" if prev and text else (prev or text)
-    session["queued_prompt"] = {"text": text, "transport": transport}
+    session["queued_prompt"] = {
+        "support_mode": support_mode,
+        "text": text,
+        "transport": transport,
+    }
 
 
-def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any) -> dict:
+def _handle_busy_submit(
+    rid,
+    sid: str,
+    session: dict,
+    text: Any,
+    transport: Any,
+    support_mode: str | None = None,
+) -> dict:
     """Apply the ``display.busy_input_mode`` policy to a prompt that lands while
     a turn is in flight, instead of rejecting it with ``session busy``.
 
@@ -4774,7 +4790,12 @@ def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any)
     """
     mode = _load_busy_input_mode()
     agent = session.get("agent")
-    if mode == "steer" and agent is not None and hasattr(agent, "steer"):
+    if (
+        not support_mode
+        and mode == "steer"
+        and agent is not None
+        and hasattr(agent, "steer")
+    ):
         try:
             if agent.steer(text):
                 session["last_active"] = time.time()
@@ -4786,7 +4807,7 @@ def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any)
             agent.interrupt()
         except Exception:
             pass
-    _enqueue_prompt(session, text, transport)
+    _enqueue_prompt(session, text, transport, support_mode)
     session["last_active"] = time.time()
     return _ok(rid, {"status": "queued"})
 
@@ -4807,7 +4828,13 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
         if queued.get("transport") is not None:
             session["transport"] = queued["transport"]
     try:
-        _run_prompt_submit(rid, sid, session, queued["text"])
+        _run_prompt_submit(
+            rid,
+            sid,
+            session,
+            queued["text"],
+            support_mode=queued.get("support_mode"),
+        )
     except Exception as exc:
         print(
             f"[tui_gateway] queued prompt dispatch failed: "
@@ -8040,11 +8067,60 @@ def _(rid, params: dict) -> dict:
 
 # ── Methods: prompt ──────────────────────────────────────────────────
 
+_COMPANION_SUPPORT_MODE_INSTRUCTIONS = {
+    "listen": (
+        "Acknowledge briefly and listen. Do not make a plan, analyze markets, force positivity, "
+        "offer unsolicited advice, troubleshoot, or ask a follow-up question unless the user "
+        "explicitly asks you one. Respect requests to simply vent."
+    ),
+    "reflect": (
+        "Offer observations with explicit uncertainty and only relevant continuity from prior "
+        "conversation. Do not diagnose the user or turn reflection into financial advice."
+    ),
+    "plan": (
+        "Help the user choose a few small, user-owned next actions. Do not command, guarantee an "
+        "outcome, or recommend a trade."
+    ),
+    "hang_out": (
+        "Be casual and lightly playful without productivity pressure. Do not push analysis, goals, "
+        "or trading activity."
+    ),
+    "presence": (
+        "Be calm and very brief. Do not repeatedly prompt, monitor the screen, manufacture urgency, "
+        "or pressure the user to continue."
+    ),
+}
+
+
+def _normalize_companion_support_mode(value: Any) -> str | None:
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str) or value not in _COMPANION_SUPPORT_MODE_INSTRUCTIONS:
+        raise ValueError("support_mode must be one of: listen, reflect, plan, hang_out, presence")
+    return value
+
+
+def _companion_support_prompt(text: Any, support_mode: str | None) -> Any:
+    if support_mode is None:
+        return text
+    instruction = _COMPANION_SUPPORT_MODE_INSTRUCTIONS[support_mode]
+    return (
+        f"[Trading Buddy support mode: {support_mode}]\n"
+        f"{instruction}\n"
+        "Never imply affection, jealousy, guilt, suffering, or consciousness. "
+        "Treat financial claims cautiously and never guarantee returns.\n\n"
+        f"User message:\n{_content_display_text(text)}"
+    )
+
 
 @method("prompt.submit")
 def _(rid, params: dict) -> dict:
     sid, text = params.get("session_id", ""), params.get("text", "")
     truncate_user_ordinal = params.get("truncate_before_user_ordinal")
+    try:
+        support_mode = _normalize_companion_support_mode(params.get("support_mode"))
+    except ValueError as exc:
+        return _err(rid, 4004, str(exc))
     session, err = _sess_nowait(params, rid)
     if err:
         return err
@@ -8059,7 +8135,14 @@ def _(rid, params: dict) -> dict:
             # interrupt the live turn) so it runs as the next turn. See
             # _handle_busy_submit for why the old "session busy" rejection
             # dropped messages when teardown outlived the client's retry window.
-            return _handle_busy_submit(rid, sid, session, text, t or session.get("transport"))
+            return _handle_busy_submit(
+                rid,
+                sid,
+                session,
+                text,
+                t or session.get("transport"),
+                support_mode,
+            )
         # A watch session's run lives in the PARENT turn, so its own running
         # flag is False — without this, typing mid-run builds a second agent
         # racing the in-flight child on the same stored session (interleaved
@@ -8117,7 +8200,7 @@ def _(rid, params: dict) -> dict:
                 session["running"] = False
                 _clear_inflight_turn(session)
                 return
-        _run_prompt_submit(rid, sid, session, text)
+        _run_prompt_submit(rid, sid, session, text, support_mode=support_mode)
 
     run_thread = threading.Thread(target=run_after_agent_ready, daemon=True)
     # Keep a handle so session.interrupt can tell a live turn from a stuck
@@ -8369,7 +8452,13 @@ def _start_notification_poller(sid: str, session: dict) -> threading.Event:
     return stop
 
 
-def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
+def _run_prompt_submit(
+    rid,
+    sid: str,
+    session: dict,
+    text: Any,
+    support_mode: str | None = None,
+) -> None:
     with session["history_lock"]:
         history = list(session["history"])
         history_version = int(session.get("history_version", 0))
@@ -8413,7 +8502,7 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
             _register_session_cwd(session)
             cols = session.get("cols", 80)
             streamer = make_stream_renderer(cols)
-            prompt = text
+            prompt = _companion_support_prompt(text, support_mode)
 
             if isinstance(prompt, str) and "@" in prompt:
                 from agent.context_references import preprocess_context_references
@@ -8515,6 +8604,10 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                 "conversation_history": list(history),
                 "stream_callback": _stream,
             }
+            if support_mode:
+                # The model receives the mode instructions, while Hermes stores
+                # the user's clean words in the canonical transcript.
+                run_kwargs["persist_user_message"] = _content_display_text(text)
             try:
                 if "task_id" in inspect.signature(agent.run_conversation).parameters:
                     run_kwargs["task_id"] = session["session_key"]
