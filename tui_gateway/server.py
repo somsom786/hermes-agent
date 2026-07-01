@@ -1223,6 +1223,8 @@ def _start_agent_build(sid: str, session: dict) -> None:
                     if (tier := current.get("create_service_tier_override")) is not None:
                         kw["service_tier_override"] = tier
                 agent = _make_agent(sid, key, **kw)
+                if current.get("trading_buddy_ephemeral"):
+                    _disable_trading_buddy_persistence(agent)
             finally:
                 _clear_session_context(tokens)
 
@@ -1507,6 +1509,8 @@ def _ensure_session_db_row(session: dict) -> None:
     happened to launch in (e.g. "desktop"). Leaving it null groups them under
     "No workspace", which is the desired default.
     """
+    if session.get("trading_buddy_ephemeral"):
+        return
     key = session.get("session_key")
     if not key:
         return
@@ -1598,6 +1602,13 @@ def _ensure_session_db_row(session: dict) -> None:
                 db.close()
             except Exception:
                 pass
+
+
+def _disable_trading_buddy_persistence(agent: Any) -> None:
+    """Keep one temporary companion session process-local and memory-only."""
+    agent._session_db = None
+    agent._session_db_created = False
+    agent._end_session_on_close = False
 
 
 def _persist_branch_seed(session: dict) -> None:
@@ -4316,7 +4327,10 @@ def _make_agent(
         checkpoints_enabled=is_truthy_value(os.environ.get("HERMES_TUI_CHECKPOINTS")),
         pass_session_id=is_truthy_value(os.environ.get("HERMES_TUI_PASS_SESSION_ID")),
         skip_context_files=is_truthy_value(os.environ.get("HERMES_IGNORE_RULES")),
-        skip_memory=is_truthy_value(os.environ.get("HERMES_IGNORE_RULES")),
+        skip_memory=(
+            is_truthy_value(os.environ.get("HERMES_IGNORE_RULES"))
+            or is_truthy_value(os.environ.get("TRADING_BUDDY_COMPANION"))
+        ),
         fallback_model=_load_fallback_model(),
         **_agent_cbs(sid),
     )
@@ -4742,6 +4756,8 @@ def _enqueue_prompt(
     text: Any,
     transport: Any,
     support_mode: str | None = None,
+    client_request_id: str | None = None,
+    companion_context: str | None = None,
 ) -> None:
     """Stash a message to run as the very next turn once the live one ends.
 
@@ -4760,6 +4776,8 @@ def _enqueue_prompt(
         prev = existing["text"]
         text = f"{prev}\n\n{text}" if prev and text else (prev or text)
     session["queued_prompt"] = {
+        "client_request_id": client_request_id,
+        "companion_context": companion_context,
         "support_mode": support_mode,
         "text": text,
         "transport": transport,
@@ -4773,6 +4791,8 @@ def _handle_busy_submit(
     text: Any,
     transport: Any,
     support_mode: str | None = None,
+    client_request_id: str | None = None,
+    companion_context: str | None = None,
 ) -> dict:
     """Apply the ``display.busy_input_mode`` policy to a prompt that lands while
     a turn is in flight, instead of rejecting it with ``session busy``.
@@ -4807,7 +4827,14 @@ def _handle_busy_submit(
             agent.interrupt()
         except Exception:
             pass
-    _enqueue_prompt(session, text, transport, support_mode)
+    _enqueue_prompt(
+        session,
+        text,
+        transport,
+        support_mode,
+        client_request_id,
+        companion_context,
+    )
     session["last_active"] = time.time()
     return _ok(rid, {"status": "queued"})
 
@@ -4834,6 +4861,8 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
             session,
             queued["text"],
             support_mode=queued.get("support_mode"),
+            client_request_id=queued.get("client_request_id"),
+            companion_context=queued.get("companion_context"),
         )
     except Exception as exc:
         print(
@@ -4887,6 +4916,10 @@ def _(rid, params: dict) -> dict:
         explicit_cwd = False
     resolved_cwd = _completion_cwd(params)
     source = str(params.get("source") or "tui").strip() or "tui"
+    trading_buddy_ephemeral = bool(
+        source == "trading_buddy"
+        and is_truthy_value(params.get("trading_buddy_ephemeral", False))
+    )
     _enable_gateway_prompts()
 
     # ``profile`` (app-global remote mode): a new chat started under a non-launch
@@ -4958,6 +4991,8 @@ def _(rid, params: dict) -> dict:
             "tool_progress_mode": _load_tool_progress_mode(),
             "tool_started_at": {},
             "transport": current_transport() or _stdio_transport,
+            "trading_buddy_ephemeral": trading_buddy_ephemeral,
+            "trading_buddy_requests": {},
         }
         _register_session_cwd(_sessions[sid])
 
@@ -5863,6 +5898,37 @@ def _(rid, params: dict) -> dict:
     if not deleted:
         return _err(rid, 4007, "session not found")
     return _ok(rid, {"deleted": target})
+
+
+@method("trading_buddy.session_delete")
+def _(rid, params: dict) -> dict:
+    """Idempotently close and purge one Trading Buddy backend runtime session.
+
+    This deliberately narrower companion method lets the Tauri privacy path
+    clean isolated Hermes state without exposing the gateway's general session
+    management surface to React.
+    """
+    target = params.get("session_id", "")
+    if (
+        not isinstance(target, str)
+        or not target
+        or len(target) > 128
+        or not all(character.isalnum() or character in "-_:." for character in target)
+    ):
+        return _err(rid, 4006, "valid session_id required")
+    with _session_resume_lock:
+        live = _find_live_session_by_key(target)
+        if live is not None:
+            _close_session_by_id(live[0], end_reason="trading_buddy_delete")
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5036)
+    sessions_dir = get_hermes_home() / "sessions"
+    try:
+        deleted = bool(db.delete_session(target, sessions_dir=sessions_dir))
+    except Exception as exc:
+        return _err(rid, 5036, f"delete failed: {exc}")
+    return _ok(rid, {"deleted": deleted, "session_id": target})
 
 
 @method("session.title")
@@ -8100,15 +8166,52 @@ def _normalize_companion_support_mode(value: Any) -> str | None:
     return value
 
 
-def _companion_support_prompt(text: Any, support_mode: str | None) -> Any:
-    if support_mode is None:
+def _normalize_trading_buddy_request_id(value: Any) -> str | None:
+    if value is None or value == "":
+        return None
+    if (
+        not isinstance(value, str)
+        or len(value) > 128
+        or not all(character.isalnum() or character in "-_:." for character in value)
+    ):
+        raise ValueError("client_request_id is invalid")
+    return value
+
+
+def _normalize_companion_context(value: Any) -> str | None:
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str) or len(value.encode("utf-8")) > 12_000:
+        raise ValueError("companion_context must be a string no larger than 12000 bytes")
+    return value
+
+
+def _companion_support_prompt(
+    text: Any,
+    support_mode: str | None,
+    companion_context: str | None = None,
+) -> Any:
+    if support_mode is None and companion_context is None:
         return text
-    instruction = _COMPANION_SUPPORT_MODE_INSTRUCTIONS[support_mode]
+    mode_section = ""
+    if support_mode is not None:
+        instruction = _COMPANION_SUPPORT_MODE_INSTRUCTIONS[support_mode]
+        mode_section = (
+            f"[Trading Buddy support mode: {support_mode}]\n"
+            f"{instruction}\n"
+            "Never imply affection, jealousy, guilt, suffering, or consciousness. "
+            "Treat financial claims cautiously and never guarantee returns.\n\n"
+        )
+    context_section = ""
+    if companion_context is not None:
+        context_section = (
+            "[Private local companion context]\n"
+            "Use this only as background. Do not quote it or mention that it was supplied.\n"
+            f"{companion_context}\n\n"
+        )
     return (
-        f"[Trading Buddy support mode: {support_mode}]\n"
-        f"{instruction}\n"
-        "Never imply affection, jealousy, guilt, suffering, or consciousness. "
-        "Treat financial claims cautiously and never guarantee returns.\n\n"
+        f"{mode_section}"
+        f"{context_section}"
         f"User message:\n{_content_display_text(text)}"
     )
 
@@ -8119,6 +8222,12 @@ def _(rid, params: dict) -> dict:
     truncate_user_ordinal = params.get("truncate_before_user_ordinal")
     try:
         support_mode = _normalize_companion_support_mode(params.get("support_mode"))
+        client_request_id = _normalize_trading_buddy_request_id(
+            params.get("client_request_id")
+        )
+        companion_context = _normalize_companion_context(
+            params.get("companion_context")
+        )
     except ValueError as exc:
         return _err(rid, 4004, str(exc))
     session, err = _sess_nowait(params, rid)
@@ -8130,6 +8239,22 @@ def _(rid, params: dict) -> dict:
     if (t := current_transport()) is not None:
         session["transport"] = t
     with session["history_lock"]:
+        request_records = session.setdefault("trading_buddy_requests", {})
+        if client_request_id and client_request_id in request_records:
+            existing = request_records[client_request_id]
+            return _ok(
+                rid,
+                {
+                    "status": existing.get("status", "streaming"),
+                    "client_request_id": client_request_id,
+                    "deduplicated": True,
+                },
+            )
+        if client_request_id:
+            if len(request_records) >= 256:
+                oldest = next(iter(request_records))
+                request_records.pop(oldest, None)
+            request_records[client_request_id] = {"status": "submitting"}
         if session.get("running"):
             # Don't reject a mid-turn prompt — queue it (and, by default,
             # interrupt the live turn) so it runs as the next turn. See
@@ -8142,6 +8267,8 @@ def _(rid, params: dict) -> dict:
                 text,
                 t or session.get("transport"),
                 support_mode,
+                client_request_id,
+                companion_context,
             )
         # A watch session's run lives in the PARENT turn, so its own running
         # flag is False — without this, typing mid-run builds a second agent
@@ -8200,14 +8327,32 @@ def _(rid, params: dict) -> dict:
                 session["running"] = False
                 _clear_inflight_turn(session)
                 return
-        _run_prompt_submit(rid, sid, session, text, support_mode=support_mode)
+        _run_prompt_submit(
+            rid,
+            sid,
+            session,
+            text,
+            support_mode=support_mode,
+            client_request_id=client_request_id,
+            companion_context=companion_context,
+        )
 
     run_thread = threading.Thread(target=run_after_agent_ready, daemon=True)
     # Keep a handle so session.interrupt can tell a live turn from a stuck
     # `running` flag (a turn that died without clearing it) and recover the latter.
     session["_run_thread"] = run_thread
     run_thread.start()
-    return _ok(rid, {"status": "streaming"})
+    return _ok(
+        rid,
+        {
+            "status": "streaming",
+            **(
+                {"client_request_id": client_request_id, "deduplicated": False}
+                if client_request_id
+                else {}
+            ),
+        },
+    )
 
 
 def _notification_event_belongs_elsewhere(session: dict, evt: dict) -> bool:
@@ -8458,6 +8603,8 @@ def _run_prompt_submit(
     session: dict,
     text: Any,
     support_mode: str | None = None,
+    client_request_id: str | None = None,
+    companion_context: str | None = None,
 ) -> None:
     with session["history_lock"]:
         history = list(session["history"])
@@ -8472,13 +8619,18 @@ def _run_prompt_submit(
             agent.clear_interrupt()
         except Exception:
             pass
-    _emit("message.start", sid)
+    _emit(
+        "message.start",
+        sid,
+        {"client_request_id": client_request_id} if client_request_id else None,
+    )
 
     def run():
         approval_token = None
         session_tokens = []
         home_token = None  # per-turn HERMES_HOME override for a resumed remote profile
         goal_followup = None  # set by the post-turn goal hook below
+        request_status = "failed"
         try:
             from tools.approval import (
                 reset_current_session_key,
@@ -8502,7 +8654,7 @@ def _run_prompt_submit(
             _register_session_cwd(session)
             cols = session.get("cols", 80)
             streamer = make_stream_renderer(cols)
-            prompt = _companion_support_prompt(text, support_mode)
+            prompt = _companion_support_prompt(text, support_mode, companion_context)
 
             if isinstance(prompt, str) and "@" in prompt:
                 from agent.context_references import preprocess_context_references
@@ -8596,6 +8748,8 @@ def _run_prompt_submit(
                 with session["history_lock"]:
                     _append_inflight_delta(session, delta)
                 payload = {"text": delta}
+                if client_request_id:
+                    payload["client_request_id"] = client_request_id
                 if streamer and (r := streamer.feed(delta)) is not None:
                     payload["rendered"] = r
                 _emit("message.delta", sid, payload)
@@ -8604,7 +8758,7 @@ def _run_prompt_submit(
                 "conversation_history": list(history),
                 "stream_callback": _stream,
             }
-            if support_mode:
+            if support_mode or companion_context:
                 # The model receives the mode instructions, while Hermes stores
                 # the user's clean words in the canonical transcript.
                 run_kwargs["persist_user_message"] = _content_display_text(text)
@@ -8718,6 +8872,9 @@ def _run_prompt_submit(
                 status = "complete"
 
             payload = {"text": raw, "usage": _get_usage(agent), "status": status}
+            request_status = status
+            if client_request_id:
+                payload["client_request_id"] = client_request_id
             if last_reasoning:
                 payload["reasoning"] = last_reasoning
             if status_note:
@@ -8867,7 +9024,10 @@ def _run_prompt_submit(
             print(
                 f"[gateway-turn] {type(e).__name__}: {e}", file=sys.stderr, flush=True
             )
-            _emit("error", sid, {"message": str(e)})
+            error_payload = {"message": str(e)}
+            if client_request_id:
+                error_payload["client_request_id"] = client_request_id
+            _emit("error", sid, error_payload)
         finally:
             try:
                 if approval_token is not None:
@@ -8878,6 +9038,10 @@ def _run_prompt_submit(
                 reset_hermes_home_override(home_token)
             _clear_session_context(session_tokens)
             with session["history_lock"]:
+                if client_request_id:
+                    session.setdefault("trading_buddy_requests", {})[
+                        client_request_id
+                    ] = {"status": request_status}
                 session["running"] = False
                 session["last_active"] = time.time()
                 _clear_inflight_turn(session)
