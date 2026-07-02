@@ -8767,6 +8767,13 @@ def _run_prompt_submit(
                     run_kwargs["task_id"] = session["session_key"]
             except (TypeError, ValueError):
                 pass
+            _emit(
+                "provider.request",
+                sid,
+                {"client_request_id": client_request_id}
+                if client_request_id
+                else None,
+            )
             result = agent.run_conversation(run_message, **run_kwargs)
             if "moa_one_shot_restore" in session:
                 _restore = session.pop("moa_one_shot_restore", None)

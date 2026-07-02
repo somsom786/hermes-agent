@@ -4835,6 +4835,7 @@ def test_prompt_submit_support_mode_changes_model_context_but_persists_clean_use
     monkeypatch,
 ):
     seen = {}
+    emitted = []
 
     class _Agent:
         def run_conversation(
@@ -4868,7 +4869,7 @@ def test_prompt_submit_support_mode_changes_model_context_but_persists_clean_use
         monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
         monkeypatch.setattr(server, "_get_usage", lambda _a: {})
         monkeypatch.setattr(server, "render_message", lambda _t, _c: "")
-        monkeypatch.setattr(server, "_emit", lambda *a: None)
+        monkeypatch.setattr(server, "_emit", lambda *args: emitted.append(args))
 
         response = server.handle_request(
             {
@@ -4878,6 +4879,7 @@ def test_prompt_submit_support_mode_changes_model_context_but_persists_clean_use
                     "session_id": "sid",
                     "support_mode": "listen",
                     "text": "I lost money today. Just listen.",
+                    "client_request_id": "request-1",
                 },
             }
         )
@@ -4886,6 +4888,11 @@ def test_prompt_submit_support_mode_changes_model_context_but_persists_clean_use
         assert "Trading Buddy support mode: listen" in seen["prompt"]
         assert "Do not make a plan" in seen["prompt"]
         assert seen["persist_user_message"] == "I lost money today. Just listen."
+        assert (
+            "provider.request",
+            "sid",
+            {"client_request_id": "request-1"},
+        ) in emitted
         assert server._sessions["sid"]["history"] == [
             {"role": "user", "content": "I lost money today. Just listen."},
             {"role": "assistant", "content": "I hear you."},
