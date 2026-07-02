@@ -2,6 +2,7 @@ import threading
 
 import pytest
 
+from toolsets import TOOLSETS
 from tui_gateway import server
 from tui_gateway.server import (
     _companion_support_prompt,
@@ -9,6 +10,14 @@ from tui_gateway.server import (
     _normalize_companion_support_mode,
     _normalize_trading_buddy_request_id,
 )
+
+
+def test_companion_toolset_is_conversation_only(monkeypatch):
+    monkeypatch.setenv("HERMES_TUI_TOOLSETS", "trading-buddy-companion")
+
+    assert TOOLSETS["trading-buddy-companion"]["tools"] == []
+    assert TOOLSETS["trading-buddy-companion"]["includes"] == []
+    assert server._load_enabled_toolsets() == ["trading-buddy-companion"]
 
 
 @pytest.mark.parametrize(
